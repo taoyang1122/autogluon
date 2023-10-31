@@ -508,6 +508,9 @@ class Custom_Transformer(nn.Module):
         projection: Optional[bool] = False,
         additive_attention: Optional[bool] = False,
         share_qv_weights: Optional[bool] = False,
+        row_attention: Optional[bool] = False,
+        row_attention_layer: Optional[str] = None,
+        global_token: Optional[bool] = False,
     ) -> None:
         """
         Parameters
@@ -554,8 +557,20 @@ class Custom_Transformer(nn.Module):
             If 'true' the transformer will use additive attention with linear complexity to sequence length.
         share_qv_weights
             if 'true', then value and query transformation parameters are shared in additive attention.
+        row_attention
+            Whether to use row attention in ft_transformer.
+        row_attention_layer
+            Which layer to use row attention. Can be "first" or "last".
         """
         super().__init__()
+        if row_attention:
+            row_attention_layer = row_attention_layer if row_attention_layer else "last"
+        else:
+            row_attention_layer = None
+        self.row_attention = row_attention
+        self.row_attention_layer = row_attention_layer
+        self.global_token = global_token
+        assert row_attention_layer in ["first", "last"], f"{row_attention_layer} is not supported."
         if isinstance(last_layer_query_idx, int):
             raise ValueError(
                 "last_layer_query_idx must be None, list[int] or slice. "
@@ -649,6 +664,55 @@ class Custom_Transformer(nn.Module):
                     layer["value_compression"] = make_kv_compression()
                 else:
                     assert kv_compression_sharing == "key-value", _INTERNAL_ERROR_MESSAGE
+            if row_attention:
+                if self.row_attention_layer == "first" and layer_idx == 0:
+                    self.row_attention_layers = nn.ModuleDict(
+                        {
+                            "row_attention": MultiheadAttention(
+                                d_token=d_token,
+                                n_heads=attention_n_heads,
+                                dropout=attention_dropout,
+                                bias=True,
+                                initialization=attention_initialization,
+                            ),
+                            "row_ffn": Custom_Transformer.FFN(
+                                d_token=d_token,
+                                d_hidden=ffn_d_hidden,
+                                bias_first=True,
+                                bias_second=True,
+                                dropout=ffn_dropout,
+                                activation=ffn_activation,
+                            ),
+                            "row_attention_residual_dropout": nn.Dropout(residual_dropout),
+                            "row_ffn_residual_dropout": nn.Dropout(residual_dropout),
+                            "row_output": nn.Identity(),  # for hooks-based introspection
+                        }
+                    )
+                    layer.update(self.row_attention_layers)
+                elif self.row_attention_layer == "last" and layer_idx == n_blocks-1:
+                    self.row_attention_layers = nn.ModuleDict(
+                        {
+                            "row_attention": MultiheadAttention(
+                                d_token=d_token,
+                                n_heads=attention_n_heads,
+                                dropout=attention_dropout,
+                                bias=True,
+                                initialization=attention_initialization,
+                            ),
+                            "row_ffn": Custom_Transformer.FFN(
+                                d_token=d_token,
+                                d_hidden=ffn_d_hidden,
+                                bias_first=True,
+                                bias_second=True,
+                                dropout=ffn_dropout,
+                                activation=ffn_activation,
+                            ),
+                            "row_attention_residual_dropout": nn.Dropout(residual_dropout),
+                            "row_ffn_residual_dropout": nn.Dropout(residual_dropout),
+                            "row_output": nn.Identity(),  # for hooks-based introspection
+                        }
+                    )
+                    layer.update(self.row_attention_layers)
             self.blocks.append(layer)
 
         self.head = (
@@ -675,7 +739,10 @@ class Custom_Transformer(nn.Module):
         )
 
     def _start_residual(self, layer, stage, x):
-        assert stage in ["attention", "ffn"], _INTERNAL_ERROR_MESSAGE
+        if not self.row_attention:
+            assert stage in ["attention", "ffn"], _INTERNAL_ERROR_MESSAGE
+        else:
+            assert stage in ["attention", "ffn", "row_attention", "row_ffn"], _INTERNAL_ERROR_MESSAGE
         x_residual = x
         if self.prenormalization:
             norm_key = f"{stage}_normalization"
@@ -684,11 +751,27 @@ class Custom_Transformer(nn.Module):
         return x_residual
 
     def _end_residual(self, layer, stage, x, x_residual):
-        assert stage in ["attention", "ffn"], _INTERNAL_ERROR_MESSAGE
+        if not self.row_attention:
+            assert stage in ["attention", "ffn"], _INTERNAL_ERROR_MESSAGE
+        else:
+            assert stage in ["attention", "ffn", "row_attention", "row_ffn"], _INTERNAL_ERROR_MESSAGE
         x_residual = layer[f"{stage}_residual_dropout"](x_residual)
         x = x + x_residual
         if not self.prenormalization:
             x = layer[f"{stage}_normalization"](x)
+        return x
+    
+    def _start_global_token(self, x):
+        if self.global_token:
+            x = torch.concat(
+                [torch.mean(x, dim=1).unsqueeze(1), x],
+                dim=1,
+            )
+        return x
+
+    def _end_global_token(self, x):
+        if self.global_token:
+            x = x[:, 1:]
         return x
 
     def forward(self, x: Tensor) -> Tensor:
@@ -696,7 +779,26 @@ class Custom_Transformer(nn.Module):
         for layer_idx, layer in enumerate(self.blocks):
             layer = cast(nn.ModuleDict, layer)
 
+            if self.row_attention_layer == "first" and layer_idx == 0:
+                x = torch.transpose(x, 0, 1)
+                x = self._start_global_token(x)
+                x_residual = self._start_residual(layer, "row_attention", x)
+                x_residual, _ = layer["row_attention"](
+                    x_residual,
+                    x_residual,
+                    None,
+                    None,
+                )
+                x = self._end_residual(layer, "row_attention", x, x_residual)
+                x_residual = self._start_residual(layer, "row_ffn", x)
+                x_residual = layer["row_ffn"](x_residual)
+                x = self._end_residual(layer, "row_ffn", x, x_residual)
+                x = layer["row_output"](x)
+                x = self._end_global_token(x)
+                x = torch.transpose(x, 0, 1)
+
             query_idx = self.last_layer_query_idx if layer_idx + 1 == len(self.blocks) else None
+            x = self._start_global_token(x)
             x_residual = self._start_residual(layer, "attention", x)
             x_residual, _ = layer["attention"](
                 x_residual if query_idx is None else x_residual[:, query_idx],
@@ -711,6 +813,25 @@ class Custom_Transformer(nn.Module):
             x_residual = layer["ffn"](x_residual)
             x = self._end_residual(layer, "ffn", x, x_residual)
             x = layer["output"](x)
+            x = self._end_global_token(x)
+
+            if self.row_attention_layer == "last" and layer_idx + 1 == len(self.blocks):
+                x = torch.transpose(x, 0, 1)
+                x = self._start_global_token(x)
+                x_residual = self._start_residual(layer, "row_attention", x)
+                x_residual, _ = layer["row_attention"](
+                    x_residual,
+                    x_residual,
+                    None,
+                    None,
+                )
+                x = self._end_residual(layer, "row_attention", x, x_residual)
+                x_residual = self._start_residual(layer, "row_ffn", x)
+                x_residual = layer["row_ffn"](x_residual)
+                x = self._end_residual(layer, "row_ffn", x, x_residual)
+                x = layer["row_output"](x)
+                x = self._end_global_token(x)
+                x = torch.transpose(x, 0, 1)
 
         x = self.head(x)
 

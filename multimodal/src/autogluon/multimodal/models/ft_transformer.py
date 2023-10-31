@@ -458,6 +458,9 @@ class FT_Transformer(nn.Module):
         additive_attention: Optional[bool] = False,
         share_qv_weights: Optional[bool] = False,
         pooling_mode: Optional[str] = "cls",
+        row_attention: Optional[bool] = False,
+        row_attention_layer: Optional[str] = None,
+        global_token: Optional[bool] = False,
     ) -> None:
         """
         Parameters
@@ -511,7 +514,11 @@ class FT_Transformer(nn.Module):
         share_qv_weights
             if 'true', then value and query transformation parameters are shared in additive attention.
         pooling_mode
-            The pooling mode for the Transformer. Can be "cls", or "mean"
+            The pooling mode for the Transformer. Can be "cls", or "mean".
+        row_attention
+            Whether to use row attention in ft_transformer.
+        row_attention_layer
+            Which layer to use row attention. Can be "first" or "last".
 
         References
         ----------
@@ -532,6 +539,13 @@ class FT_Transformer(nn.Module):
         self.prefix = prefix
         self.out_features = adapter_output_feature
         self.pooling_mode = pooling_mode
+        if row_attention:
+            row_attention_layer = row_attention_layer if row_attention_layer else "last"
+        else:
+            row_attention_layer = None
+        self.row_attention = row_attention
+        self.row_attention_layer = row_attention_layer
+        self.global_token = global_token
 
         self.categorical_feature_tokenizer = None
         self.numerical_feature_tokenizer = None
@@ -578,6 +592,9 @@ class FT_Transformer(nn.Module):
             projection=False,
             additive_attention=additive_attention,
             share_qv_weights=share_qv_weights,
+            row_attention=row_attention,
+            row_attention_layer=row_attention_layer,
+            global_token=global_token,
         )
 
         self.head = Custom_Transformer.Head(

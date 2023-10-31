@@ -367,6 +367,9 @@ def create_model(
             additive_attention=OmegaConf.select(model_config, "additive_attention", default=False),
             share_qv_weights=OmegaConf.select(model_config, "share_qv_weights", default=False),
             pooling_mode=OmegaConf.select(model_config, "pooling_mode", default="cls"),
+            row_attention=model_config.row_attention,
+            row_attention_layer=model_config.row_attention_layer,
+            global_token=model_config.global_token,
         )
     else:
         raise ValueError(f"unknown model name: {model_name}")
