@@ -564,13 +564,14 @@ class Custom_Transformer(nn.Module):
         """
         super().__init__()
         if row_attention:
+            assert row_attention_layer in ["first", "last"], f"Row attention layer {row_attention_layer} is not supported."
             row_attention_layer = row_attention_layer if row_attention_layer else "last"
         else:
             row_attention_layer = None
         self.row_attention = row_attention
         self.row_attention_layer = row_attention_layer
         self.global_token = global_token
-        assert row_attention_layer in ["first", "last"], f"{row_attention_layer} is not supported."
+        
         if isinstance(last_layer_query_idx, int):
             raise ValueError(
                 "last_layer_query_idx must be None, list[int] or slice. "

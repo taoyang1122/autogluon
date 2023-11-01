@@ -2033,27 +2033,74 @@ class MultiModalPredictor(ExportMixin):
         else:
             ret_type = LOGITS
 
-        outputs = predict(
-            predictor=self,
-            data=data,
-            requires_label=True,
-            realtime=realtime,
-        )
-        logits = extract_from_output(ret_type=ret_type, outputs=outputs)
+        if not hasattr(self._model, "row_attention") or not self._model.row_attention:
+            outputs = predict(
+                predictor=self,
+                data=data,
+                requires_label=True,
+                realtime=realtime,
+            )
+            logits = extract_from_output(ret_type=ret_type, outputs=outputs)
 
-        metric_data = {}
-        if self._problem_type in [BINARY, MULTICLASS]:
-            y_pred_prob = logits_to_prob(logits)
+            metric_data = {}
+            if self._problem_type in [BINARY, MULTICLASS]:
+                y_pred_prob = logits_to_prob(logits)
+                metric_data[Y_PRED_PROB] = y_pred_prob
+
+            y_pred = self._df_preprocessor.transform_prediction(
+                y_pred=logits,
+                inverse_categorical=False,
+            )
+            y_pred_inv = self._df_preprocessor.transform_prediction(
+                y_pred=logits,
+                inverse_categorical=True,
+            )
+        else:
+            pred_prob = []
+            pred = []
+            pred_inv = []
+            for _ in range(self._config.env.test_ensemble_rounds):
+                data_ = copy.deepcopy(data)
+                data_.reset_index(drop=True, inplace=True)
+                perm = np.random.RandomState().permutation(data_.shape[0])
+                data_ = data_.reindex(perm)
+                data_.reset_index(drop=True, inplace=True)
+
+                outputs = predict(
+                    predictor=self,
+                    data=data_,
+                    requires_label=True,
+                    realtime=realtime,
+                )
+                logits = extract_from_output(ret_type=ret_type, outputs=outputs)
+
+                if self._problem_type in [BINARY, MULTICLASS]:
+                    per_pred_prob = logits_to_prob(logits)
+
+                per_pred = self._df_preprocessor.transform_prediction(
+                    y_pred=logits,
+                    inverse_categorical=False,
+                )
+                per_pred_inv = self._df_preprocessor.transform_prediction(
+                    y_pred=logits,
+                    inverse_categorical=True,
+                )
+
+                inverse_perm = np.argsort(perm)
+                per_pred_prob = per_pred_prob[inverse_perm]
+                per_pred = per_pred[inverse_perm]
+                per_pred_inv = per_pred_inv[inverse_perm]
+
+                pred_prob.append(per_pred_prob)
+                pred.append[per_pred]
+                pred_inv.append(per_pred_inv)
+                
+            y_pred_prob = np.median(pred_prob, axis=0)
+            y_pred = np.median(pred, axis=0)
+            y_pred_inv = np.median(pred_inv, axis=0)
+            metric_data = {}
             metric_data[Y_PRED_PROB] = y_pred_prob
 
-        y_pred = self._df_preprocessor.transform_prediction(
-            y_pred=logits,
-            inverse_categorical=False,
-        )
-        y_pred_inv = self._df_preprocessor.transform_prediction(
-            y_pred=logits,
-            inverse_categorical=True,
-        )
 
         if self._problem_type == NER:
             y_true = self._df_preprocessor.transform_label_for_metric(df=data, tokenizer=self._model.tokenizer)
@@ -2146,8 +2193,55 @@ class MultiModalPredictor(ExportMixin):
             List of class names
         """
         return self._model.model.CLASSES
-
+    
     def predict(
+        self,
+        data: Union[pd.DataFrame, dict, list, str],
+        candidate_data: Optional[Union[pd.DataFrame, dict, list]] = None,
+        id_mappings: Optional[Union[Dict[str, Dict], Dict[str, pd.Series]]] = None,
+        as_pandas: Optional[bool] = None,
+        realtime: Optional[bool] = None,
+        save_results: Optional[bool] = None,
+    ):
+        if not hasattr(self._model, "row_attention") or not self._model.row_attention:
+            return self.predict_single_round(
+                data=data,
+                candidate_data=candidate_data,
+                id_mappings=id_mappings,
+                as_pandas=as_pandas,
+                realtime=realtime,
+                save_results=save_results,
+            )
+
+        pred = []
+        for _ in range(self._config.env.test_ensemble_rounds):
+            print(_)
+            data_ = copy.deepcopy(data)
+            data_.reset_index(drop=True, inplace=True)
+            perm = np.random.RandomState().permutation(data_.shape[0])
+            data_ = data_.reindex(perm)
+            data_.reset_index(drop=True, inplace=True)
+
+            per_pred = self.predict_single_round(
+                data=data,
+                candidate_data=candidate_data,
+                id_mappings=id_mappings,
+                as_pandas=False,
+                realtime=realtime,
+                save_results=False,
+            )
+
+            inverse_perm = np.argsort(perm)
+            per_pred = per_pred[inverse_perm]
+            pred.append(per_pred)
+
+        pred = np.median(pred, axis=0)
+
+        if (as_pandas is None and isinstance(data, pd.DataFrame)) or as_pandas is True:
+            pred = self._as_pandas(data=data, to_be_converted=pred)
+        return pred
+
+    def predict_single_round(
         self,
         data: Union[pd.DataFrame, dict, list, str],
         candidate_data: Optional[Union[pd.DataFrame, dict, list]] = None,
@@ -2289,8 +2383,8 @@ class MultiModalPredictor(ExportMixin):
                     data=data,
                     result_path=None,
                 )
-            else:
-                pred = self._as_pandas(data=data, to_be_converted=pred)
+            # else:
+            #     pred = self._as_pandas(data=data, to_be_converted=pred)
 
         return pred
 
