@@ -31,6 +31,8 @@ class TimmAutoModelForImagePrediction(nn.Module):
         num_classes: Optional[int] = 0,
         mix_choice: Optional[str] = "all_logits",
         pretrained: Optional[bool] = True,
+        image_size: int = None,
+        variable_input_size: bool = False,
     ):
         """
         Load a pretrained image backbone from TIMM.
@@ -65,7 +67,7 @@ class TimmAutoModelForImagePrediction(nn.Module):
                         if k not in self.config:
                             self.config[k] = v
                     self.checkpoint_name = self.config.get("architecture", None)
-                    self.model = create_model(self.checkpoint_name, checkpoint_path=checkpoint_path, num_classes=0)
+                    self.model = create_model(self.checkpoint_name, checkpoint_path=checkpoint_path, num_classes=0, img_size=image_size)
                     # create a head with new num_classes
                     self.head = (
                         Linear(in_features=self.config["num_features"], out_features=num_classes)
@@ -77,11 +79,12 @@ class TimmAutoModelForImagePrediction(nn.Module):
                 raise ValueError(f"Timm model path {checkpoint_name} does not exist or model is invalid.")
         else:
             self.checkpoint_name = checkpoint_name
-            self.model = create_model(checkpoint_name, pretrained=pretrained, num_classes=num_classes)
+            self.model = create_model(checkpoint_name, pretrained=pretrained, num_classes=num_classes, img_size=image_size)
             self.head = get_model_head(model=self.model)
             self.config = self.model.default_cfg
             self.num_classes = self.model.num_classes
 
+        self.variable_input_size = variable_input_size
         self.pretrained = pretrained
         self.out_features = self.model.num_features
         self.global_pool = self.model.global_pool if hasattr(self.model, "global_pool") else None
@@ -121,7 +124,7 @@ class TimmAutoModelForImagePrediction(nn.Module):
 
     def support_variable_input_size(self):
         """Whether the TIMM image support images sizes that are different from the default used in the backbones"""
-        if "test_input_size" in self.config and self.config["test_input_size"] != self.config["input_size"]:
+        if self.variable_input_size or ("test_input_size" in self.config and self.config["test_input_size"] != self.config["input_size"]):
             return True
         cls_name = type(self.model).__name__.lower()
         for k in SUPPORT_VARIABLE_INPUT_SIZE_TIMM_CLASSES:

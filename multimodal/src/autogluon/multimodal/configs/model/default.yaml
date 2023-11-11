@@ -105,6 +105,7 @@ model:
       - "center_crop"
     image_norm: "imagenet"
     image_size: null
+    variable_input_size: False
     max_img_num_per_col: 2
 
   mmdet_image:

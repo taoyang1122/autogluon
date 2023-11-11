@@ -203,6 +203,8 @@ def create_model(
             num_classes=num_classes,
             mix_choice=model_config.mix_choice,
             pretrained=pretrained,
+            image_size=model_config.image_size,
+            variable_input_size=model_config.variable_input_size
         )
     elif model_name.lower().startswith(HF_TEXT):
         model = HFAutoModelForTextPrediction(
